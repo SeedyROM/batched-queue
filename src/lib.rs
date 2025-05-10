@@ -52,6 +52,10 @@
 use std::time::Duration;
 use thiserror::Error;
 
+// Export the sync BatchedQueue by default
+#[cfg(feature = "sync")]
+pub use sync::BatchedQueue;
+
 /// Error type for a batched queue.
 #[derive(Error, Debug, Clone)]
 pub enum BatchedQueueError {
@@ -201,6 +205,7 @@ pub trait BatchedQueueTrait<T> {
     /// or other implementation-specific errors.
     fn flush(&self) -> Result<(), BatchedQueueError>;
 }
+
 #[cfg(feature = "sync")]
 pub mod sync {
     //! Synchronous implementation of the batched queue.
@@ -1166,6 +1171,3 @@ pub mod sync {
         }
     }
 }
-
-#[cfg(feature = "sync")]
-pub use sync::BatchedQueue;
