@@ -63,7 +63,7 @@ fn main() {
     }
     
     // Flush any remaining items that haven't formed a complete batch
-    sender.flush();
+    sender.flush().expect("Failed to flush queue");
     
     // Process batches
     while let Ok(batch) = queue.try_next_batch() {
