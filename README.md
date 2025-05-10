@@ -52,21 +52,21 @@ use batched_queue::{BatchedQueue, BatchedQueueTrait};
 
 fn main() {
     // Create a queue with batch size of 10
-    let queue = BatchedQueue::new(10);
+    let queue = BatchedQueue::new(10).expect("Failed to create queue");
     
     // Create a sender that can be shared across threads
     let sender = queue.create_sender();
     
     // Push items to the queue
     for i in 0..25 {
-        sender.push(i);
+        sender.push(i).expect("Failed to push item");
     }
     
     // Flush any remaining items that haven't formed a complete batch
     sender.flush();
     
     // Process batches
-    while let Some(batch) = queue.try_next_batch() {
+    while let Ok(batch) = queue.try_next_batch() {
         println!("Processing batch of {} items", batch.len());
         for item in batch {
             println!("  Item: {}", item);
@@ -84,7 +84,7 @@ use std::time::Duration;
 
 fn main() {
     // Create a queue with batch size of 5
-    let queue = BatchedQueue::new(5);
+    let queue = BatchedQueue::new(5).expect("Failed to create queue");
     
     // Create a sender that can be shared across threads
     let sender = queue.create_sender();
@@ -92,10 +92,10 @@ fn main() {
     // Producer thread
     let producer = thread::spawn(move || {
         for i in 0..100 {
-            sender.push(i);
+            sender.push(i).expect("Failed to push item");
             thread::sleep(Duration::from_millis(5));
         }
-        sender.flush(); // Send any remaining items
+        sender.flush().expect("Failed to flush queue"); // Send any remaining items
     });
     
     // Consumer thread
@@ -128,7 +128,7 @@ use batched_queue::{BatchedQueue, BatchedQueueTrait};
 
 fn main() {
     // Create a queue with batch size 10 and at most 5 batches in the channel
-    let queue = BatchedQueue::new_bounded(10, 5);
+    let queue = BatchedQueue::new_bounded(10, 5).expect("Failed to create bounded queue");
     
     // When the channel is full, producers will block when attempting to send a full batch
     // This provides automatic backpressure to control memory usage
@@ -138,25 +138,6 @@ fn main() {
     // ... use queue as normal
 }
 ```
-
-## API Overview
-
-The `BatchedQueueTrait` provides the following key methods:
-
-- `new(batch_size: usize)` - Create a new batched queue with the specified batch size
-- `push(item: T)` - Add an item to the queue
-- `try_next_batch()` - Attempt to retrieve the next batch without blocking
-- `next_batch()` - Retrieve the next batch, blocking until one is available
-- `next_batch_timeout(timeout: Duration)` - Retrieve the next batch with a timeout
-- `flush()` - Force any pending items to be sent as a batch
-- `is_empty()` - Check if the queue is empty
-
-Additional methods are available on the `BatchedQueueSender`:
-
-- `push(item: T)` - Add an item to the queue (potentially blocking)
-- `try_push(item: T)` - Add an item without blocking
-- `flush()` - Force any pending items to be sent as a batch (blocking)
-- `try_flush()` - Force any pending items to be sent without blocking
 
 ## Performance
 
