@@ -418,7 +418,7 @@ pub mod sync {
         pub fn close_queue(&self) -> Vec<T> {
             // Take any items left in the current batch
             let mut batch = self.current_batch.lock();
-            std::mem::replace(&mut *batch, Vec::with_capacity(0))
+            std::mem::take(&mut *batch)
         }
     }
 
