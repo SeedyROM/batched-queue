@@ -221,7 +221,7 @@ pub mod sync {
         use std::time::Duration;
 
         #[test]
-        fn test_multithreaded() {
+        fn multithreaded() {
             let queue = BatchedQueue::<i32>::new(10);
             let sender1 = queue.create_sender();
             let sender2 = queue.create_sender();
@@ -286,7 +286,7 @@ pub mod sync {
         }
 
         #[test]
-        fn test_timeout() {
+        fn timeout() {
             let queue = BatchedQueue::<i32>::new(5);
             let sender = queue.create_sender();
 
@@ -308,7 +308,7 @@ pub mod sync {
         }
 
         #[test]
-        fn test_bounded_channel() {
+        fn bounded_channel() {
             // Create a bounded queue with batch size 5 and max 2 batches in the channel
             let queue = BatchedQueue::new_bounded(5, 2);
             let sender = queue.create_sender();
@@ -407,7 +407,7 @@ pub mod sync {
             use std::time::{Duration, Instant};
 
             #[test]
-            fn stress_test_batched_queue() {
+            fn batched_queue() {
                 // Configuration parameters
                 const BATCH_SIZE: usize = 100;
                 const CHANNEL_CAPACITY: usize = 10;
