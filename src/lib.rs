@@ -1,6 +1,6 @@
 //! # `batched-queue`
 //!
-//! A high-performance, lock-free batched queue implementation for Rust.
+//! A high-performance, highly-concurrent batched queue implementation for Rust.
 //!
 //! `batched-queue` provides an efficient way to collect individual items into batches
 //! for processing, which can significantly improve throughput in high-volume systems.

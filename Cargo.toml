@@ -1,9 +1,9 @@
 [package]
 name = "batched-queue"
-description = "A high-performance, lock-free batched queue implementation for Rust."
+description = "A high-performance, highly-concurrent batched queue implementation for Rust."
 readme = "README.md"
 categories = ["concurrency", "data-structures"]
-keywords = ["message queue", "batched", "lock-free", "concurrent", "async"]
+keywords = ["message queue", "batched", "concurrent", "async"]
 
 version = "0.1.0"
 edition = "2024"

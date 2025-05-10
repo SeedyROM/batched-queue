@@ -1,6 +1,6 @@
 # `batched-queue`
 
-A high-performance, lock-free batched queue implementation for Rust.
+A high-performance, highly-concurrent batched queue implementation for Rust.
 
 [![GitHub](https://img.shields.io/badge/github-batched--queue-8da0cb?logo=github)](https://github.com/SeedyROM/batched-queue)
 [![Crates.io](https://img.shields.io/crates/v/batched-queue.svg)](https://crates.io/crates/batched-queue)
@@ -144,7 +144,7 @@ fn main() {
 `batched-queue` is designed for high performance in concurrent environments:
 
 - Optimized for minimal lock contention
-- Uses efficient lock-free algorithms where possible
+- Uses efficient lock-free algorithms where possible, highly concurrent otherwise
 - Can achieve millions of items per second on modern hardware
 
 ## License
