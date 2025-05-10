@@ -1,23 +1,206 @@
+//! # Batched Queue
+//!
+//! A high-performance, lock-free batched queue implementation for Rust.
+//!
+//! `batched-queue` provides an efficient way to collect individual items into batches
+//! for processing, which can significantly improve throughput in high-volume systems.
+//!
+//! ## Features
+//!
+//! - **Batching**: Automatically collects items into batches of a configurable size
+//! - **Thread-safe**: Designed for concurrent usage with multiple producers and consumers
+//! - **Backpressure**: Optional bounded queue to control memory usage
+//! - **Flexible retrieval**: Blocking, non-blocking, and timeout-based batch retrieval
+//! - **Multiple implementations**: Synchronous (default) and asynchronous modes via feature flags
+//!
+//! ## Usage
+//!
+//! By default, the crate provides a synchronous implementation:
+//!
+//! ```rust
+//! use batched_queue::{BatchedQueue, BatchedQueueTrait};
+//!
+//! // Create a queue with batch size of 10
+//! let queue = BatchedQueue::new(10);
+//!
+//! // Create a sender that can be shared across threads
+//! let sender = queue.create_sender();
+//!
+//! // Push items to the queue (in real usage, this would be in another thread)
+//! for i in 0..25 {
+//!     sender.push(i);
+//! }
+//!
+//! // Flush any remaining items that haven't formed a complete batch
+//! sender.flush();
+//!
+//! // Process batches
+//! while let Some(batch) = queue.try_next_batch() {
+//!     println!("Processing batch of {} items", batch.len());
+//!     for item in batch {
+//!         // Process each item
+//!         println!("  Item: {}", item);
+//!     }
+//! }
+//! ```
+//!
+//! ## Feature Flags
+//!
+//! - `sync` (default): Enables the synchronous implementation using `parking_lot` and `crossbeam-channel`
+//! - `async`: Enables the asynchronous implementation using `tokio`
+
+/// Defines the common interface for batched queue implementations.
+///
+/// This trait provides methods for adding items to a queue, retrieving
+/// batches of items, and checking queue status.
 pub trait BatchedQueueTrait<T> {
+    /// Creates a new batched queue with the specified batch size.
+    ///
+    /// The batch size determines how many items will be collected before
+    /// a batch is automatically sent for processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_size` - The number of items to collect before forming a batch
     fn new(batch_size: usize) -> Self;
+
+    /// Adds an item to the queue.
+    ///
+    /// If adding this item causes the current batch to reach the configured
+    /// batch size, the batch will be automatically sent for processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `item` - The item to add to the queue
     fn push(&self, item: T);
+
+    /// Attempts to retrieve the next available batch without blocking.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Vec<T>)` - A batch of items if available
+    /// * `None` - If no batch is currently available
     fn try_next_batch(&self) -> Option<Vec<T>>;
+
+    /// Retrieves the next available batch, blocking until one is available.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Vec<T>)` - The next batch of items
+    /// * `None` - If the queue has been closed or disconnected
     fn next_batch(&self) -> Option<Vec<T>>;
+
+    /// Retrieves the next available batch, blocking until one is available
+    /// or the timeout is reached.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum time to wait for a batch
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Vec<T>)` - A batch of items if available within the timeout
+    /// * `None` - If no batch becomes available within the timeout or the queue is closed
     fn next_batch_timeout(&self, timeout: std::time::Duration) -> Option<Vec<T>>;
+
+    /// Returns the total number of items that have been added to the queue.
+    ///
+    /// # Returns
+    ///
+    /// * The count of items added to the queue
     fn len(&self) -> usize;
+
+    /// Returns the batch size configured for this queue.
+    ///
+    /// # Returns
+    ///
+    /// * The configured batch size
     fn capacity(&self) -> usize;
+
+    /// Flushes any pending items into a batch, even if the batch is not full.
+    ///
+    /// This is useful when shutting down or when items need to be processed
+    /// without waiting for a full batch.
+    ///
+    /// # Returns
+    ///
+    /// * `true` - If the flush was successful
+    /// * `false` - If the flush failed (e.g., if the queue is disconnected)
     fn flush(&self) -> bool;
+
+    /// Checks if the queue is empty.
+    ///
+    /// # Returns
+    ///
+    /// * `true` - If there are no batches available and no items in the current batch
+    /// * `false` - If there are batches available or items in the current batch
     fn is_empty(&self) -> bool;
 }
 
 #[cfg(feature = "sync")]
 pub mod sync {
+    //! Synchronous implementation of the batched queue.
+    //!
+    //! This module provides a thread-safe implementation using `crossbeam-channel`
+    //! for communication and `parking_lot::Mutex` for low-contention locking.
+    //! It is designed for high-throughput scenarios where items need to be
+    //! processed in batches.
+
     use super::BatchedQueueTrait;
     use crossbeam_channel as channel;
     use parking_lot::Mutex;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// A thread-safe, high-performance queue that automatically batches items.
+    ///
+    /// `BatchedQueue` collects individual items until reaching the configured batch size,
+    /// then automatically makes the batch available for processing. This batching approach
+    /// can significantly improve throughput in high-volume systems by reducing overhead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use batched_queue::{BatchedQueue, BatchedQueueTrait};
+    ///
+    /// use std::thread;
+    /// use std::time::Duration;
+    ///
+    /// // Create a queue with batch size of 5
+    /// let queue = BatchedQueue::new(5);
+    ///
+    /// // Create a sender that can be shared across threads
+    /// let sender = queue.create_sender();
+    ///
+    /// // Producer thread
+    /// let producer = thread::spawn(move || {
+    ///     for i in 0..20 {
+    ///         sender.push(i);
+    ///         thread::sleep(Duration::from_millis(10));
+    ///     }
+    ///     sender.flush(); // Send any remaining items
+    /// });
+    ///
+    /// // Consumer thread
+    /// let consumer = thread::spawn(move || {
+    ///     let mut all_items = Vec::new();
+    ///     
+    ///     // Process batches as they become available
+    ///     while all_items.len() < 20 {
+    ///         if let Some(batch) = queue.next_batch_timeout(Duration::from_millis(100)) {
+    ///             all_items.extend(batch);
+    ///         }
+    ///     }
+    ///     
+    ///     all_items
+    /// });
+    ///
+    /// // Wait for threads to complete
+    /// producer.join().unwrap();
+    /// let result = consumer.join().unwrap();
+    ///
+    /// assert_eq!(result.len(), 20);
+    /// ```
     pub struct BatchedQueue<T> {
         batch_size: usize,
         current_batch: Arc<Mutex<Vec<T>>>,
@@ -27,6 +210,19 @@ pub mod sync {
     }
 
     impl<T: Send + 'static> BatchedQueue<T> {
+        /// Creates a new batched queue with the specified batch size and an unbounded channel.
+        ///
+        /// # Arguments
+        ///
+        /// * `batch_size` - The number of items to collect before forming a batch
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        ///
+        /// let queue = BatchedQueue::<String>::new(10);
+        /// ```
         pub fn new(batch_size: usize) -> Self {
             let (batch_sender, batch_receiver) = channel::unbounded();
             Self {
@@ -38,7 +234,25 @@ pub mod sync {
             }
         }
 
-        // Create a queue with a bounded channel for backpressure
+        /// Creates a new batched queue with a bounded channel for backpressure.
+        ///
+        /// Using a bounded channel helps control memory usage by limiting the number
+        /// of batches that can be queued at once. When the channel is full, producers
+        /// will block when attempting to send a full batch.
+        ///
+        /// # Arguments
+        ///
+        /// * `batch_size` - The number of items to collect before forming a batch
+        /// * `max_batches` - The maximum number of batches that can be queued
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        ///
+        /// // Create a queue with batch size 10 and at most 5 batches in the channel
+        /// let queue = BatchedQueue::<i32>::new_bounded(10, 5);
+        /// ```
         pub fn new_bounded(batch_size: usize, max_batches: usize) -> Self {
             let (batch_sender, batch_receiver) = channel::bounded(max_batches);
             Self {
@@ -50,6 +264,44 @@ pub mod sync {
             }
         }
 
+        /// Creates a sender for this queue that can be shared across threads.
+        ///
+        /// Multiple senders can be created from a single queue, allowing
+        /// for concurrent producers.
+        ///
+        /// # Returns
+        ///
+        /// A new `BatchedQueueSender` linked to this queue
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        /// use std::thread;
+        ///
+        /// let queue = BatchedQueue::<i32>::new(10);
+        ///
+        /// // Create multiple senders for different threads
+        /// let sender1 = queue.create_sender();
+        /// let sender2 = queue.create_sender();
+        ///
+        /// // Use senders in different threads
+        /// let t1 = thread::spawn(move || {
+        ///     for i in 0..10 {
+        ///         sender1.push(i);
+        ///     }
+        /// });
+        ///
+        /// let t2 = thread::spawn(move || {
+        ///     for i in 10..20 {
+        ///         sender2.push(i);
+        ///     }
+        /// });
+        ///
+        /// // Wait for producers to finish
+        /// t1.join().unwrap();
+        /// t2.join().unwrap();
+        /// ```
         pub fn create_sender(&self) -> BatchedQueueSender<T> {
             BatchedQueueSender {
                 batch_size: self.batch_size,
@@ -59,7 +311,32 @@ pub mod sync {
             }
         }
 
-        // Can be called when shutting down to ensure all senders are dropped
+        /// Takes any items left in the current batch and returns them when shutting down.
+        ///
+        /// This method is useful during controlled shutdown to collect any remaining items
+        /// that haven't formed a complete batch.
+        ///
+        /// # Returns
+        ///
+        /// A vector containing any items that were in the current batch
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        ///
+        /// let queue = BatchedQueue::<i32>::new(10);
+        /// let sender = queue.create_sender();
+        ///
+        /// // Add some items, but not enough to form a complete batch
+        /// for i in 0..3 {
+        ///     sender.push(i);
+        /// }
+        ///
+        /// // Close the queue and get remaining items
+        /// let remaining = queue.close_queue();
+        /// assert_eq!(remaining.len(), 3);
+        /// ```
         pub fn close_queue(&self) -> Vec<T> {
             // Take any items left in the current batch
             let mut batch = self.current_batch.lock();
@@ -135,6 +412,31 @@ pub mod sync {
         }
     }
 
+    /// A sender handle for adding items to a batched queue.
+    ///
+    /// `BatchedQueueSender` provides methods to add items to a batched queue from multiple
+    /// threads. It handles the details of batch management and automatic flushing of batches
+    /// when they reach the configured size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use batched_queue::BatchedQueue;
+    /// use std::thread;
+    ///
+    /// let queue = BatchedQueue::<String>::new(5);
+    /// let sender = queue.create_sender();
+    ///
+    /// // Share the sender with another thread
+    /// thread::spawn(move || {
+    ///     for i in 0..10 {
+    ///         sender.push(format!("Item {}", i));
+    ///     }
+    ///     
+    ///     // Ensure any remaining items are sent
+    ///     sender.flush();
+    /// });
+    /// ```
     pub struct BatchedQueueSender<T> {
         batch_size: usize,
         current_batch: Arc<Mutex<Vec<T>>>,
@@ -154,6 +456,28 @@ pub mod sync {
     }
 
     impl<T: Send + Clone + 'static> BatchedQueueSender<T> {
+        /// Adds an item to the queue.
+        ///
+        /// If adding this item causes the current batch to reach the configured
+        /// batch size, the batch will be automatically sent for processing.
+        /// This method will block if the channel is bounded and full.
+        ///
+        /// # Arguments
+        ///
+        /// * `item` - The item to add to the queue
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        ///
+        /// let queue = BatchedQueue::<i32>::new(5);
+        /// let sender = queue.create_sender();
+        ///
+        /// for i in 0..10 {
+        ///     sender.push(i);
+        /// }
+        /// ```
         pub fn push(&self, item: T) {
             let mut batch = self.current_batch.lock();
             batch.push(item);
@@ -168,7 +492,30 @@ pub mod sync {
             }
         }
 
-        // Non-blocking push that returns false if the channel is full
+        /// Attempts to add an item to the queue without blocking.
+        ///
+        /// This method is similar to `push`, but it will not block if the channel
+        /// is bounded and full. Instead, if a full batch cannot be sent because
+        /// the channel is full, the batch is kept in the current batch and will
+        /// be sent on a future push or flush operation.
+        ///
+        /// # Arguments
+        ///
+        /// * `item` - The item to add to the queue
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        ///
+        /// // Create a queue with limited capacity
+        /// let queue = BatchedQueue::<i32>::new_bounded(5, 1);
+        /// let sender = queue.create_sender();
+        ///
+        /// for i in 0..20 {
+        ///     sender.try_push(i);
+        /// }
+        /// ```
         pub fn try_push(&self, item: T) {
             let mut batch = self.current_batch.lock();
             batch.push(item);
@@ -189,6 +536,31 @@ pub mod sync {
             }
         }
 
+        /// Flushes any pending items into a batch, even if the batch is not full.
+        ///
+        /// This method will block if the channel is bounded and full.
+        ///
+        /// # Returns
+        ///
+        /// * `true` - If the flush was successful or there were no items to flush
+        /// * `false` - If the flush failed (e.g., if the channel is disconnected)
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        ///
+        /// let queue = BatchedQueue::<i32>::new(10);
+        /// let sender = queue.create_sender();
+        ///
+        /// // Add some items, but not enough to form a complete batch
+        /// for i in 0..3 {
+        ///     sender.push(i);
+        /// }
+        ///
+        /// // Flush to ensure items are sent for processing
+        /// sender.flush();
+        /// ```
         pub fn flush(&self) -> bool {
             let mut batch = self.current_batch.lock();
             if !batch.is_empty() {
@@ -200,7 +572,31 @@ pub mod sync {
             }
         }
 
-        // Try to flush without blocking, returns false if channel is full
+        /// Attempts to flush any pending items without blocking.
+        ///
+        /// # Returns
+        ///
+        /// * `true` - If the flush was successful or there were no items to flush
+        /// * `false` - If the flush failed (e.g., if the channel is full or disconnected)
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use batched_queue::BatchedQueue;
+        ///
+        /// // Create a queue with limited capacity
+        /// let queue = BatchedQueue::<i32>::new_bounded(5, 1);
+        /// let sender = queue.create_sender();
+        ///
+        /// for i in 0..3 {
+        ///     sender.push(i);
+        /// }
+        ///
+        /// // Try to flush without blocking
+        /// if !sender.try_flush() {
+        ///     println!("Channel is full, will try again later");
+        /// }
+        /// ```
         pub fn try_flush(&self) -> bool {
             let mut batch = self.current_batch.lock();
             if !batch.is_empty() {
