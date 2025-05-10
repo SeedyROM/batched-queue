@@ -21,21 +21,21 @@
 //! use batched_queue::{BatchedQueue, BatchedQueueTrait};
 //!
 //! // Create a queue with batch size of 10
-//! let queue = BatchedQueue::new(10);
+//! let queue = BatchedQueue::new(10).expect("Failed to create queue");
 //!
 //! // Create a sender that can be shared across threads
 //! let sender = queue.create_sender();
 //!
 //! // Push items to the queue (in real usage, this would be in another thread)
 //! for i in 0..25 {
-//!     sender.push(i);
+//!     sender.push(i).expect("Failed to push item");
 //! }
 //!
 //! // Flush any remaining items that haven't formed a complete batch
-//! sender.flush();
+//! sender.flush().expect("Failed to flush");
 //!
 //! // Process batches
-//! while let Some(batch) = queue.try_next_batch() {
+//! while let Some(batch) = queue.try_next_batch().expect("Failed to get batch") {
 //!     println!("Processing batch of {} items", batch.len());
 //!     for item in batch {
 //!         // Process each item
@@ -49,20 +49,95 @@
 //! - [`sync`] (default): Enables the synchronous implementation using [`parking_lot`] and [`crossbeam_channel`]
 //! - `async`: Enables the asynchronous implementation using tokio
 
+use std::time::Duration;
+use thiserror::Error;
+
+/// Error type for a batched queue.
+#[derive(Error, Debug, Clone)]
+pub enum BatchedQueueError {
+    #[error("Channel is full (backpressure limit reached)")]
+    ChannelFull,
+
+    #[error("Channel is disconnected (all receivers dropped)")]
+    Disconnected,
+
+    #[error("Operation timed out after {0:?}")]
+    Timeout(Duration),
+
+    #[error("Queue capacity exceeded: tried to add more than {max_capacity} items")]
+    CapacityExceeded { max_capacity: usize },
+
+    #[error("Invalid batch size: {0}")]
+    InvalidBatchSize(usize),
+
+    #[error("Failed to send batch: {0}")]
+    SendError(String),
+
+    #[error("Failed to receive batch: {0}")]
+    ReceiveError(String),
+}
+
+/// Contextual information about [`BatchedQueueError`].
+#[derive(Debug, Clone)]
+pub struct ErrorContext {
+    pub operation: String,
+    pub queue_info: String,
+}
+
+impl BatchedQueueError {
+    pub fn timeout(duration: Duration) -> Self {
+        BatchedQueueError::Timeout(duration)
+    }
+
+    pub fn capacity_exceeded(max_capacity: usize) -> Self {
+        BatchedQueueError::CapacityExceeded { max_capacity }
+    }
+}
+
 /// Defines the common interface for batched queue implementations.
 ///
 /// This trait provides methods for adding items to a queue, retrieving
-/// batches of items, and checking queue status.
+/// batches of items, and checking queue status. All implementations must
+/// handle the buffering of items until they form complete batches, and
+/// provide mechanisms for flushing partial batches when needed.
+///
+/// # Examples
+///
+/// ```
+/// use batched_queue::{BatchedQueue, BatchedQueueTrait};
+///
+/// // Create a queue with batch size of 10
+/// let queue = BatchedQueue::new(10).expect("Failed to create queue");
+///
+/// // Create a sender that can be shared across threads
+/// let sender = queue.create_sender();
+///
+/// // Push items to the queue (in real usage, this would be in another thread)
+/// for i in 0..25 {
+///     sender.push(i).expect("Failed to push item");
+/// }
+///
+/// // Flush any remaining items that haven't formed a complete batch
+/// sender.flush().expect("Failed to flush");
+///
+/// // Process batches
+/// while let Some(batch) = queue.try_next_batch().expect("Failed to get batch") {
+///     println!("Processing batch of {} items", batch.len());
+///     for item in batch {
+///         // Process each item
+///         println!("  Item: {}", item);
+///     }
+/// }
+/// ```
 pub trait BatchedQueueTrait<T> {
-    /// Creates a new batched queue with the specified batch size.
-    ///
-    /// The batch size determines how many items will be collected before
-    /// a batch is automatically sent for processing.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch_size` - The number of items to collect before forming a batch
-    fn new(batch_size: usize) -> Self;
+    /// Returns the current number of items in the queue.
+    fn len(&self) -> usize;
+
+    /// Returns the maximum number of items a batch can hold.
+    fn capacity(&self) -> usize;
+
+    /// Returns `true` if the queue has no items waiting to be processed.
+    fn is_empty(&self) -> bool;
 
     /// Adds an item to the queue.
     ///
@@ -72,71 +147,60 @@ pub trait BatchedQueueTrait<T> {
     /// # Arguments
     ///
     /// * `item` - The item to add to the queue
-    fn push(&self, item: T);
+    ///
+    /// # Errors
+    ///
+    /// Returns `BatchedQueueError::Disconnected` if the receiving end has been dropped,
+    /// or other implementation-specific errors.
+    fn push(&self, item: T) -> Result<(), BatchedQueueError>;
 
-    /// Attempts to retrieve the next available batch without blocking.
+    /// Attempts to retrieve the next batch of items without blocking.
     ///
     /// # Returns
     ///
-    /// * `Some(Vec<T>)` - A batch of items if available
-    /// * `None` - If no batch is currently available
-    fn try_next_batch(&self) -> Option<Vec<T>>;
-
-    /// Retrieves the next available batch, blocking until one is available.
+    /// * `Ok(Some(batch))` - A batch of items is available
+    /// * `Ok(None)` - No batch is currently available
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// * `Some(Vec<T>)` - The next batch of items
-    /// * `None` - If the queue has been closed or disconnected
-    fn next_batch(&self) -> Option<Vec<T>>;
+    /// Returns `BatchedQueueError::Disconnected` if the sending end has been dropped,
+    /// or other implementation-specific errors.
+    fn try_next_batch(&self) -> Result<Option<Vec<T>>, BatchedQueueError>;
 
-    /// Retrieves the next available batch, blocking until one is available
-    /// or the timeout is reached.
+    /// Retrieves the next batch of items, blocking until one is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BatchedQueueError::Disconnected` if the sending end has been dropped,
+    /// or other implementation-specific errors.
+    fn next_batch(&self) -> Result<Vec<T>, BatchedQueueError>;
+
+    /// Retrieves the next batch of items, blocking until one is available or until the timeout expires.
     ///
     /// # Arguments
     ///
-    /// * `timeout` - Maximum time to wait for a batch
+    /// * `timeout` - Maximum time to wait for a batch to become available
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// * `Some(Vec<T>)` - A batch of items if available within the timeout
-    /// * `None` - If no batch becomes available within the timeout or the queue is closed
-    fn next_batch_timeout(&self, timeout: std::time::Duration) -> Option<Vec<T>>;
-
-    /// Returns the total number of items that have been added to the queue.
-    ///
-    /// # Returns
-    ///
-    /// * The count of items added to the queue
-    fn len(&self) -> usize;
-
-    /// Returns the batch size configured for this queue.
-    ///
-    /// # Returns
-    ///
-    /// * The configured batch size
-    fn capacity(&self) -> usize;
+    /// Returns:
+    /// * `BatchedQueueError::Timeout` if no batch becomes available within the timeout period
+    /// * `BatchedQueueError::Disconnected` if the sending end has been dropped
+    /// * Other implementation-specific errors
+    fn next_batch_timeout(&self, timeout: std::time::Duration)
+    -> Result<Vec<T>, BatchedQueueError>;
 
     /// Flushes any pending items into a batch, even if the batch is not full.
     ///
-    /// This is useful when shutting down or when items need to be processed
-    /// without waiting for a full batch.
+    /// This is useful for ensuring that all items are processed, especially
+    /// during shutdown or when batches need to be processed on demand.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// * `true` - If the flush was successful
-    /// * `false` - If the flush failed (e.g., if the queue is disconnected)
-    fn flush(&self) -> bool;
-
-    /// Checks if the queue is empty.
-    ///
-    /// # Returns
-    ///
-    /// * `true` - If there are no batches available and no items in the current batch
-    /// * `false` - If there are batches available or items in the current batch
-    fn is_empty(&self) -> bool;
+    /// Returns `BatchedQueueError::Disconnected` if the receiving end has been dropped,
+    /// or other implementation-specific errors.
+    fn flush(&self) -> Result<(), BatchedQueueError>;
 }
-
 #[cfg(feature = "sync")]
 pub mod sync {
     //! Synchronous implementation of the batched queue.
@@ -146,7 +210,7 @@ pub mod sync {
     //! It is designed for high-throughput scenarios where items need to be
     //! processed in batches.
 
-    use super::BatchedQueueTrait;
+    use super::*;
     use crossbeam_channel as channel;
     use parking_lot::Mutex;
     use std::sync::Arc;
@@ -167,7 +231,7 @@ pub mod sync {
     /// use std::time::Duration;
     ///
     /// // Create a queue with batch size of 5
-    /// let queue = BatchedQueue::new(5);
+    /// let queue = BatchedQueue::new(5).expect("Failed to create queue");
     ///
     /// // Create a sender that can be shared across threads
     /// let sender = queue.create_sender();
@@ -175,10 +239,10 @@ pub mod sync {
     /// // Producer thread
     /// let producer = thread::spawn(move || {
     ///     for i in 0..20 {
-    ///         sender.push(i);
+    ///         sender.push(i).expect("Failed to push item");
     ///         thread::sleep(Duration::from_millis(10));
     ///     }
-    ///     sender.flush(); // Send any remaining items
+    ///     sender.flush().expect("Failed to flush"); // Send any remaining items
     /// });
     ///
     /// // Consumer thread
@@ -187,7 +251,7 @@ pub mod sync {
     ///     
     ///     // Process batches as they become available
     ///     while all_items.len() < 20 {
-    ///         if let Some(batch) = queue.next_batch_timeout(Duration::from_millis(100)) {
+    ///         if let Ok(batch) = queue.next_batch_timeout(Duration::from_millis(100)) {
     ///             all_items.extend(batch);
     ///         }
     ///     }
@@ -221,17 +285,21 @@ pub mod sync {
         /// ```
         /// use batched_queue::BatchedQueue;
         ///
-        /// let queue = BatchedQueue::<String>::new(10);
+        /// let queue = BatchedQueue::<String>::new(10).expect("Failed to create queue");
         /// ```
-        pub fn new(batch_size: usize) -> Self {
+        pub fn new(batch_size: usize) -> Result<Self, BatchedQueueError> {
+            if batch_size == 0 {
+                return Err(BatchedQueueError::InvalidBatchSize(batch_size));
+            }
+
             let (batch_sender, batch_receiver) = channel::unbounded();
-            Self {
+            Ok(Self {
                 batch_size,
                 current_batch: Arc::new(Mutex::new(Vec::with_capacity(batch_size))),
                 batch_receiver,
                 batch_sender,
                 item_count: Arc::new(AtomicUsize::new(0)),
-            }
+            })
         }
 
         /// Creates a new batched queue with a bounded channel for backpressure.
@@ -251,17 +319,27 @@ pub mod sync {
         /// use batched_queue::BatchedQueue;
         ///
         /// // Create a queue with batch size 10 and at most 5 batches in the channel
-        /// let queue = BatchedQueue::<i32>::new_bounded(10, 5);
+        /// let queue = BatchedQueue::<i32>::new_bounded(10, 5).expect("Failed to create queue");
         /// ```
-        pub fn new_bounded(batch_size: usize, max_batches: usize) -> Self {
+        pub fn new_bounded(
+            batch_size: usize,
+            max_batches: usize,
+        ) -> Result<Self, BatchedQueueError> {
+            if batch_size == 0 {
+                return Err(BatchedQueueError::InvalidBatchSize(batch_size));
+            }
+            if max_batches == 0 {
+                return Err(BatchedQueueError::InvalidBatchSize(max_batches));
+            }
+
             let (batch_sender, batch_receiver) = channel::bounded(max_batches);
-            Self {
+            Ok(Self {
                 batch_size,
                 current_batch: Arc::new(Mutex::new(Vec::with_capacity(batch_size))),
                 batch_receiver,
                 batch_sender,
                 item_count: Arc::new(AtomicUsize::new(0)),
-            }
+            })
         }
 
         /// Creates a sender for this queue that can be shared across threads.
@@ -279,7 +357,7 @@ pub mod sync {
         /// use batched_queue::BatchedQueue;
         /// use std::thread;
         ///
-        /// let queue = BatchedQueue::<i32>::new(10);
+        /// let queue = BatchedQueue::<i32>::new(10).expect("Failed to create queue");
         ///
         /// // Create multiple senders for different threads
         /// let sender1 = queue.create_sender();
@@ -288,13 +366,13 @@ pub mod sync {
         /// // Use senders in different threads
         /// let t1 = thread::spawn(move || {
         ///     for i in 0..10 {
-        ///         sender1.push(i);
+        ///         sender1.push(i).expect("Failed to push item");
         ///     }
         /// });
         ///
         /// let t2 = thread::spawn(move || {
         ///     for i in 10..20 {
-        ///         sender2.push(i);
+        ///         sender2.push(i).expect("Failed to push item");
         ///     }
         /// });
         ///
@@ -325,12 +403,12 @@ pub mod sync {
         /// ```
         /// use batched_queue::BatchedQueue;
         ///
-        /// let queue = BatchedQueue::<i32>::new(10);
+        /// let queue = BatchedQueue::<i32>::new(10).expect("Failed to create queue");
         /// let sender = queue.create_sender();
         ///
         /// // Add some items, but not enough to form a complete batch
         /// for i in 0..3 {
-        ///     sender.push(i);
+        ///     sender.push(i).expect("Failed to push item");
         /// }
         ///
         /// // Close the queue and get remaining items
@@ -345,46 +423,48 @@ pub mod sync {
     }
 
     impl<T: Send + 'static> BatchedQueueTrait<T> for BatchedQueue<T> {
-        fn new(batch_size: usize) -> Self {
-            Self::new(batch_size)
-        }
-
-        fn push(&self, item: T) {
+        fn push(&self, item: T) -> Result<(), BatchedQueueError> {
             let mut batch = self.current_batch.lock();
             batch.push(item);
 
-            // Update item count atomically
             let count = self.item_count.fetch_add(1, Ordering::SeqCst);
 
-            // Check if batch is full (accounting for potential race conditions)
             if count % self.batch_size == self.batch_size - 1 {
-                // Batch full, create a new one and send the full batch
                 let full_batch =
                     std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
 
-                // Send the full batch - will block if channel is bounded and full
-                let _ = self.batch_sender.send(full_batch);
+                self.batch_sender
+                    .send(full_batch)
+                    .map_err(|_| BatchedQueueError::Disconnected)?;
             }
+
+            Ok(())
         }
 
-        fn try_next_batch(&self) -> Option<Vec<T>> {
+        fn try_next_batch(&self) -> Result<Option<Vec<T>>, BatchedQueueError> {
             match self.batch_receiver.try_recv() {
-                Ok(batch) => Some(batch),
-                Err(_) => None,
+                Ok(batch) => Ok(Some(batch)),
+                Err(channel::TryRecvError::Empty) => Ok(None),
+                Err(channel::TryRecvError::Disconnected) => Err(BatchedQueueError::Disconnected),
             }
         }
 
-        fn next_batch(&self) -> Option<Vec<T>> {
-            match self.batch_receiver.recv() {
-                Ok(batch) => Some(batch),
-                Err(_) => None,
-            }
+        fn next_batch(&self) -> Result<Vec<T>, BatchedQueueError> {
+            self.batch_receiver
+                .recv()
+                .map_err(|_| BatchedQueueError::Disconnected)
         }
 
-        fn next_batch_timeout(&self, timeout: std::time::Duration) -> Option<Vec<T>> {
+        fn next_batch_timeout(
+            &self,
+            timeout: std::time::Duration,
+        ) -> Result<Vec<T>, BatchedQueueError> {
             match self.batch_receiver.recv_timeout(timeout) {
-                Ok(batch) => Some(batch),
-                Err(_) => None,
+                Ok(batch) => Ok(batch),
+                Err(channel::RecvTimeoutError::Timeout) => Err(BatchedQueueError::Timeout(timeout)),
+                Err(channel::RecvTimeoutError::Disconnected) => {
+                    Err(BatchedQueueError::Disconnected)
+                }
             }
         }
 
@@ -396,15 +476,16 @@ pub mod sync {
             self.batch_size
         }
 
-        fn flush(&self) -> bool {
+        fn flush(&self) -> Result<(), BatchedQueueError> {
             let mut batch = self.current_batch.lock();
             if !batch.is_empty() {
                 let partial_batch =
                     std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
-                self.batch_sender.send(partial_batch).is_ok()
-            } else {
-                true
+                self.batch_sender
+                    .send(partial_batch)
+                    .map_err(|_| BatchedQueueError::Disconnected)?;
             }
+            Ok(())
         }
 
         fn is_empty(&self) -> bool {
@@ -424,17 +505,17 @@ pub mod sync {
     /// use batched_queue::BatchedQueue;
     /// use std::thread;
     ///
-    /// let queue = BatchedQueue::<String>::new(5);
+    /// let queue = BatchedQueue::<String>::new(5).expect("Failed to create queue");
     /// let sender = queue.create_sender();
     ///
     /// // Share the sender with another thread
     /// thread::spawn(move || {
     ///     for i in 0..10 {
-    ///         sender.push(format!("Item {}", i));
+    ///         sender.push(format!("Item {}", i)).expect("Failed to push item");
     ///     }
     ///     
     ///     // Ensure any remaining items are sent
-    ///     sender.flush();
+    ///     sender.flush().expect("Failed to flush");
     /// });
     /// ```
     pub struct BatchedQueueSender<T> {
@@ -471,14 +552,14 @@ pub mod sync {
         /// ```
         /// use batched_queue::BatchedQueue;
         ///
-        /// let queue = BatchedQueue::<i32>::new(5);
+        /// let queue = BatchedQueue::<i32>::new(5).expect("Failed to create queue");
         /// let sender = queue.create_sender();
         ///
         /// for i in 0..10 {
-        ///     sender.push(i);
+        ///     sender.push(i).expect("Failed to push item");
         /// }
         /// ```
-        pub fn push(&self, item: T) {
+        pub fn push(&self, item: T) -> Result<(), BatchedQueueError> {
             let mut batch = self.current_batch.lock();
             batch.push(item);
 
@@ -488,8 +569,12 @@ pub mod sync {
                 let full_batch =
                     std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
 
-                let _ = self.batch_sender.send(full_batch);
+                self.batch_sender
+                    .send(full_batch)
+                    .map_err(|_| BatchedQueueError::Disconnected)?;
             }
+
+            Ok(())
         }
 
         /// Attempts to add an item to the queue without blocking.
@@ -509,14 +594,14 @@ pub mod sync {
         /// use batched_queue::BatchedQueue;
         ///
         /// // Create a queue with limited capacity
-        /// let queue = BatchedQueue::<i32>::new_bounded(5, 1);
+        /// let queue = BatchedQueue::<i32>::new_bounded(5, 1).expect("Failed to create queue");
         /// let sender = queue.create_sender();
         ///
         /// for i in 0..20 {
         ///     sender.try_push(i);
         /// }
         /// ```
-        pub fn try_push(&self, item: T) {
+        pub fn try_push(&self, item: T) -> Result<(), BatchedQueueError> {
             let mut batch = self.current_batch.lock();
             batch.push(item);
 
@@ -527,57 +612,66 @@ pub mod sync {
                     std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
 
                 // Try to send the batch
-                if self.batch_sender.try_send(full_batch.clone()).is_err() {
-                    // If channel is full, put the batch back
-                    *batch = full_batch;
-                    // We didn't actually send a batch, so decrement the count
-                    self.item_count.fetch_sub(1, Ordering::SeqCst);
+                match self.batch_sender.try_send(full_batch.clone()) {
+                    Ok(_) => {}
+                    Err(channel::TrySendError::Full(_)) => {
+                        // If channel is full, put the batch back
+                        *batch = full_batch;
+                        // We didn't actually send a batch, so decrement the count
+                        self.item_count.fetch_sub(1, Ordering::SeqCst);
+                        return Err(BatchedQueueError::ChannelFull);
+                    }
+                    Err(channel::TrySendError::Disconnected(_)) => {
+                        return Err(BatchedQueueError::Disconnected);
+                    }
                 }
             }
+
+            Ok(())
         }
 
         /// Flushes any pending items into a batch, even if the batch is not full.
         ///
         /// This method will block if the channel is bounded and full.
         ///
-        /// # Returns
+        /// # Error
         ///
-        /// * `true` - If the flush was successful or there were no items to flush
-        /// * `false` - If the flush failed (e.g., if the channel is disconnected)
+        /// Returns `BatchedQueueError::Disconnected` if the receiving end has been dropped,
         ///
         /// # Examples
         ///
         /// ```
         /// use batched_queue::BatchedQueue;
         ///
-        /// let queue = BatchedQueue::<i32>::new(10);
+        /// let queue = BatchedQueue::<i32>::new(10).expect("Failed to create queue");
         /// let sender = queue.create_sender();
         ///
         /// // Add some items, but not enough to form a complete batch
         /// for i in 0..3 {
-        ///     sender.push(i);
+        ///     sender.push(i).expect("Failed to push item");
         /// }
         ///
         /// // Flush to ensure items are sent for processing
-        /// sender.flush();
+        /// sender.flush().expect("Failed to flush");
         /// ```
-        pub fn flush(&self) -> bool {
+        pub fn flush(&self) -> Result<(), BatchedQueueError> {
             let mut batch = self.current_batch.lock();
             if !batch.is_empty() {
                 let partial_batch =
                     std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
-                self.batch_sender.send(partial_batch).is_ok()
-            } else {
-                true
+                self.batch_sender
+                    .send(partial_batch)
+                    .map_err(|_| BatchedQueueError::Disconnected)?;
             }
+            Ok(())
         }
 
         /// Attempts to flush any pending items without blocking.
         ///
-        /// # Returns
+        /// # Errors
         ///
-        /// * `true` - If the flush was successful or there were no items to flush
-        /// * `false` - If the flush failed (e.g., if the channel is full or disconnected)
+        /// Returns `BatchedQueueError::Disconnected` if the receiving end has been dropped,
+        /// or `BatchedQueueError::ChannelFull` if the channel is full.
         ///
         /// # Examples
         ///
@@ -585,26 +679,32 @@ pub mod sync {
         /// use batched_queue::BatchedQueue;
         ///
         /// // Create a queue with limited capacity
-        /// let queue = BatchedQueue::<i32>::new_bounded(5, 1);
+        /// let queue = BatchedQueue::<i32>::new_bounded(5, 1).expect("Failed to create queue");
         /// let sender = queue.create_sender();
         ///
         /// for i in 0..3 {
-        ///     sender.push(i);
+        ///     sender.push(i).expect("Failed to push item");
         /// }
         ///
         /// // Try to flush without blocking
-        /// if !sender.try_flush() {
+        /// if !sender.try_flush().is_ok() {
         ///     println!("Channel is full, will try again later");
         /// }
         /// ```
-        pub fn try_flush(&self) -> bool {
+        pub fn try_flush(&self) -> Result<(), BatchedQueueError> {
             let mut batch = self.current_batch.lock();
             if !batch.is_empty() {
                 let partial_batch =
                     std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
-                self.batch_sender.try_send(partial_batch).is_ok()
+                match self.batch_sender.try_send(partial_batch) {
+                    Ok(_) => Ok(()),
+                    Err(channel::TrySendError::Full(_)) => Err(BatchedQueueError::ChannelFull),
+                    Err(channel::TrySendError::Disconnected(_)) => {
+                        Err(BatchedQueueError::Disconnected)
+                    }
+                }
             } else {
-                true
+                Ok(())
             }
         }
     }
@@ -618,26 +718,26 @@ pub mod sync {
 
         #[test]
         fn multithreaded() {
-            let queue = BatchedQueue::<i32>::new(10);
+            let queue = BatchedQueue::<i32>::new(10).expect("Failed to create queue");
             let sender1 = queue.create_sender();
             let sender2 = queue.create_sender();
 
             // Thread 1: Push numbers 0-49
             let t1 = thread::spawn(move || {
                 for i in 0..50 {
-                    sender1.push(i);
+                    sender1.push(i).expect("Failed to push item");
                     thread::sleep(Duration::from_millis(1));
                 }
-                sender1.flush();
+                sender1.flush().expect("Failed to flush");
             });
 
             // Thread 2: Push numbers 100-149
             let t2 = thread::spawn(move || {
                 for i in 100..150 {
-                    sender2.push(i);
+                    sender2.push(i).expect("Failed to push item");
                     thread::sleep(Duration::from_millis(1));
                 }
-                sender2.flush();
+                sender2.flush().expect("Failed to flush");
             });
 
             // Consumer thread: Collect all batches
@@ -646,14 +746,14 @@ pub mod sync {
 
                 // Collect for a reasonable amount of time
                 for _ in 0..15 {
-                    if let Some(batch) = queue.try_next_batch() {
+                    if let Some(batch) = queue.try_next_batch().expect("Failed to get batch") {
                         all_items.extend(batch);
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
 
                 // Make sure we got all remaining batches
-                while let Some(batch) = queue.try_next_batch() {
+                while let Some(batch) = queue.try_next_batch().expect("Failed to get batch") {
                     all_items.extend(batch);
                 }
 
@@ -683,20 +783,20 @@ pub mod sync {
 
         #[test]
         fn timeout() {
-            let queue = BatchedQueue::<i32>::new(5);
+            let queue = BatchedQueue::<i32>::new(5).expect("Failed to create queue");
             let sender = queue.create_sender();
 
             // Add 3 items (not enough to trigger a batch)
             for i in 1..4 {
-                sender.push(i);
+                sender.push(i).unwrap();
             }
 
             // Try to get a batch with a short timeout - should time out
             let result = queue.next_batch_timeout(Duration::from_millis(10));
-            assert!(result.is_none());
+            assert!(result.is_err());
 
             // Now flush the incomplete batch
-            sender.flush();
+            sender.flush().unwrap();
 
             // Should get the batch now
             let batch = queue.next_batch_timeout(Duration::from_millis(10)).unwrap();
@@ -706,7 +806,7 @@ pub mod sync {
         #[test]
         fn bounded_channel() {
             // Create a bounded queue with batch size 5 and max 2 batches in the channel
-            let queue = BatchedQueue::new_bounded(5, 2);
+            let queue = BatchedQueue::new_bounded(5, 2).expect("Failed to create queue");
             let sender = queue.create_sender();
 
             // Producer thread
@@ -715,7 +815,7 @@ pub mod sync {
                 // Try to push 20 items
                 for item_idx in 0..20 {
                     // Use push which will block if the channel is full
-                    sender.push(item_idx);
+                    sender.push(item_idx).expect("Failed to push item");
                     successful_pushes += 1;
 
                     // Add a small delay
@@ -724,7 +824,7 @@ pub mod sync {
                         thread::sleep(Duration::from_millis(5));
                     }
                 }
-                sender.flush();
+                sender.flush().expect("Failed to flush");
                 successful_pushes
             });
 
@@ -735,7 +835,7 @@ pub mod sync {
             // Receive batches while the producer is running
             while received_batches < 4 {
                 // Expect 4 full batches of 5 items each
-                if let Some(batch) = queue.try_next_batch() {
+                if let Some(batch) = queue.try_next_batch().expect("Failed to get batch") {
                     received_batches += 1;
                     all_items.extend(batch);
                 }
@@ -746,7 +846,7 @@ pub mod sync {
             let successful_pushes = handle.join().unwrap();
 
             // Receive any remaining batches
-            while let Some(batch) = queue.try_next_batch() {
+            while let Some(batch) = queue.try_next_batch().expect("Failed to get batch") {
                 all_items.extend(batch);
             }
 
@@ -765,32 +865,79 @@ pub mod sync {
         #[test]
         fn backpressure() {
             // Create a bounded queue with backpressure
-            let queue = BatchedQueue::new_bounded(5, 1); // Only 1 batch in the channel
+            let queue = BatchedQueue::new_bounded(5, 1).expect("Failed to create queue"); // Only 1 batch in the channel
             let sender = queue.create_sender();
 
             // Fill the first batch and send it
             for i in 0..5 {
-                sender.push(i);
+                sender.push(i).expect("Failed to push item");
             }
             // Now the batch is automatically sent because it's full
 
             // Create a partial second batch
             for i in 5..8 {
-                sender.push(i);
+                sender.push(i).expect("Failed to push item");
             }
 
             // At this point, we have one full batch in the channel and a partial batch in current_batch
 
             // Get the first batch to make room in the channel
-            let batch = queue.next_batch().unwrap();
+            let batch = queue.next_batch().expect("Failed to get batch");
             assert_eq!(batch, vec![0, 1, 2, 3, 4]);
 
             // Now flush the partial batch - this should succeed
-            assert!(sender.try_flush());
+            assert!(sender.try_flush().is_ok());
 
             // And we should get the second batch
-            let batch = queue.next_batch_timeout(Duration::from_millis(50)).unwrap();
+            let batch = queue
+                .next_batch_timeout(Duration::from_millis(50))
+                .expect("Failed to get batch");
             assert_eq!(batch, vec![5, 6, 7]);
+        }
+
+        #[test]
+        fn error_handling() {
+            // Test invalid batch size
+            let invalid_queue = BatchedQueue::<i32>::new(0);
+            assert!(matches!(
+                invalid_queue,
+                Err(BatchedQueueError::InvalidBatchSize(0))
+            ));
+
+            // Create a queue with very limited capacity - only 1 batch in the channel
+            let limited_queue = BatchedQueue::new_bounded(5, 1).expect("Failed to create queue");
+            let limited_sender = limited_queue.create_sender();
+
+            // Fill the channel with one complete batch
+            for i in 0..5 {
+                limited_sender
+                    .push(i)
+                    .expect("Should succeed for first batch");
+            }
+
+            // At this point, we have one full batch in the channel
+            // Now, add items to start building a second batch
+            for i in 5..9 {
+                limited_sender
+                    .push(i)
+                    .expect("Should succeed as we're building a partial batch");
+            }
+
+            // Try to complete the second batch, which should fail with ChannelFull
+            // because when it completes, it immediately tries to send it
+            let result = limited_sender.try_push(9);
+            assert!(matches!(result, Err(BatchedQueueError::ChannelFull)));
+
+            // Now let's test the timeout
+            // First ensure there's nothing ready in the queue by consuming the batch
+            limited_queue
+                .next_batch()
+                .expect("Should get the first batch");
+
+            // Now we should have nothing in the channel and only a partial batch
+            // Try to get a batch with a very short timeout
+            let result = limited_queue.next_batch_timeout(Duration::from_millis(1));
+            assert!(matches!(result, Err(BatchedQueueError::Timeout(_))));
         }
 
         #[cfg(test)]
@@ -812,7 +959,10 @@ pub mod sync {
                 const CONSUMER_COUNT: usize = 4;
 
                 // Wrap the queue in an Arc so it can be safely shared between threads
-                let queue = Arc::new(BatchedQueue::new_bounded(BATCH_SIZE, CHANNEL_CAPACITY));
+                let queue = Arc::new(
+                    BatchedQueue::new_bounded(BATCH_SIZE, CHANNEL_CAPACITY)
+                        .expect("Failed to create queue"),
+                );
 
                 // Setup synchronization primitives
                 let start_barrier = Arc::new(Barrier::new(PRODUCER_COUNT + CONSUMER_COUNT + 1));
@@ -848,7 +998,7 @@ pub mod sync {
 
                             for i in 0..ITEMS_PER_PRODUCER {
                                 let item = offset + i;
-                                queue_sender.push(item);
+                                queue_sender.push(item).expect("Failed to push item");
                                 local_produced.insert(item);
 
                                 // Occasionally sleep to create more contention patterns
@@ -858,7 +1008,7 @@ pub mod sync {
                             }
 
                             // Ensure final batch is sent
-                            queue_sender.flush();
+                            queue_sender.flush().expect("Failed to flush");
 
                             // Record items this producer generated
                             let mut global_produced = produced.lock();
@@ -894,7 +1044,7 @@ pub mod sync {
 
                             loop {
                                 // Try to get a batch with timeout
-                                if let Some(batch) =
+                                if let Ok(batch) =
                                     queue.next_batch_timeout(Duration::from_millis(100))
                                 {
                                     batches_processed += 1;

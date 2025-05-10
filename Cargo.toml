@@ -23,6 +23,6 @@ tracing = { version = "0.1.41", optional = true }
 
 [features]
 default = ["sync"]
-tracing = ["tracing"]
+tracing = ["dep:tracing"]
 sync = ["parking_lot", "crossbeam-channel"]
 async = ["tokio"]
