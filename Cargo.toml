@@ -1,7 +1,18 @@
 [package]
 name = "batched-queue"
+description = "A high-performance, lock-free batched queue implementation for Rust."
+readme = "README.md"
+categories = ["concurrency", "data-structures"]
+keywords = ["message queue", "batched", "lock-free", "concurrent", "async"]
+
 version = "0.1.0"
 edition = "2024"
+
+license-file = "LICENSE"
+
+documentation = "https://docs.rs/batched-queue"
+homepage = "https://github.com/SeedyROM/batched-queue"
+repository = "https://github.com/SeedyROM/batched-queue"
 
 [dependencies]
 crossbeam-channel = { version = "0.5.15", optional = true }
