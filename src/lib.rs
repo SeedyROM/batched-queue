@@ -1,4 +1,4 @@
-//! # Batched Queue
+//! # `batched-queue`
 //!
 //! A high-performance, lock-free batched queue implementation for Rust.
 //!
@@ -46,8 +46,8 @@
 //!
 //! ## Feature Flags
 //!
-//! - `sync` (default): Enables the synchronous implementation using `parking_lot` and `crossbeam-channel`
-//! - `async`: Enables the asynchronous implementation using `tokio`
+//! - [`sync`] (default): Enables the synchronous implementation using [`parking_lot`] and [`crossbeam_channel`]
+//! - `async`: Enables the asynchronous implementation using tokio
 
 /// Defines the common interface for batched queue implementations.
 ///
@@ -141,8 +141,8 @@ pub trait BatchedQueueTrait<T> {
 pub mod sync {
     //! Synchronous implementation of the batched queue.
     //!
-    //! This module provides a thread-safe implementation using `crossbeam-channel`
-    //! for communication and `parking_lot::Mutex` for low-contention locking.
+    //! This module provides a thread-safe implementation using [`crossbeam_channel`]
+    //! for communication and [`parking_lot::Mutex`] for low-contention locking.
     //! It is designed for high-throughput scenarios where items need to be
     //! processed in batches.
 
@@ -154,7 +154,7 @@ pub mod sync {
 
     /// A thread-safe, high-performance queue that automatically batches items.
     ///
-    /// `BatchedQueue` collects individual items until reaching the configured batch size,
+    /// [`BatchedQueue`] collects individual items until reaching the configured batch size,
     /// then automatically makes the batch available for processing. This batching approach
     /// can significantly improve throughput in high-volume systems by reducing overhead.
     ///
@@ -271,7 +271,7 @@ pub mod sync {
         ///
         /// # Returns
         ///
-        /// A new `BatchedQueueSender` linked to this queue
+        /// A new [`BatchedQueueSender`] linked to this queue
         ///
         /// # Examples
         ///
