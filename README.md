@@ -3,7 +3,7 @@
 A high-performance, lock-free batched queue implementation for Rust.
 
 [![GitHub](https://img.shields.io/badge/github-batched--queue-8da0cb?logo=github)](https://github.com/SeedyROM/batched-queue)
-[![Crates.io](https://img.shields.io/crates/v/batched-queue.svg)](https://crates.io/crates/SeedyROM/batched-queue)
+[![Crates.io](https://img.shields.io/crates/v/batched-queue.svg)](https://crates.io/crates/batched-queue)
 [![Documentation](https://docs.rs/batched-queue/badge.svg)](https://docs.rs/batched-queue)
 [![crates.io version](https://img.shields.io/crates/l/batched-queue.svg)](https://github.com/SeedyROM/batched-queue/blob/main/LICENSE)
 
