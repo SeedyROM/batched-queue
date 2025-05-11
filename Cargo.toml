@@ -26,3 +26,10 @@ default = ["sync"]
 tracing = ["dep:tracing"]
 sync = ["parking_lot", "crossbeam-channel"]
 async = ["tokio"]
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "queue_benchmark"
+harness = false
