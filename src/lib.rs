@@ -565,17 +565,28 @@ pub mod sync {
         /// }
         /// ```
         pub fn push(&self, item: T) -> Result<(), BatchedQueueError> {
-            let mut batch = self.current_batch.lock();
-            batch.push(item);
+            let should_send_batch;
+            let mut full_batch = None;
 
-            let count = self.item_count.fetch_add(1, Ordering::SeqCst);
+            {
+                let mut batch = self.current_batch.lock();
+                batch.push(item);
 
-            if count % self.batch_size == self.batch_size - 1 {
-                let full_batch =
-                    std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
+                let count = self.item_count.fetch_add(1, Ordering::SeqCst);
+                should_send_batch = count % self.batch_size == self.batch_size - 1;
 
+                if should_send_batch {
+                    // Take the batch but minimize time in the critical section
+                    full_batch = Some(std::mem::replace(
+                        &mut *batch,
+                        Vec::with_capacity(self.batch_size),
+                    ));
+                }
+            }
+
+            if let Some(batch) = full_batch {
                 self.batch_sender
-                    .send(full_batch)
+                    .send(batch)
                     .map_err(|_| BatchedQueueError::Disconnected)?;
             }
 
@@ -607,21 +618,35 @@ pub mod sync {
         /// }
         /// ```
         pub fn try_push(&self, item: T) -> Result<(), BatchedQueueError> {
-            let mut batch = self.current_batch.lock();
-            batch.push(item);
+            let should_send_batch;
+            let mut full_batch = None;
 
-            let count = self.item_count.fetch_add(1, Ordering::SeqCst);
+            {
+                let mut batch = self.current_batch.lock();
+                batch.push(item);
 
-            if count % self.batch_size == self.batch_size - 1 {
-                let full_batch =
-                    std::mem::replace(&mut *batch, Vec::with_capacity(self.batch_size));
+                let count = self.item_count.fetch_add(1, Ordering::SeqCst);
+                should_send_batch = count % self.batch_size == self.batch_size - 1;
 
-                // Try to send the batch
-                match self.batch_sender.try_send(full_batch.clone()) {
+                if should_send_batch {
+                    // Take the batch but minimize time in the critical section
+                    full_batch = Some(std::mem::replace(
+                        &mut *batch,
+                        Vec::with_capacity(self.batch_size),
+                    ));
+                }
+            }
+
+            if let Some(batch_to_send) = full_batch {
+                match self.batch_sender.try_send(batch_to_send.clone()) {
                     Ok(_) => {}
                     Err(channel::TrySendError::Full(_)) => {
-                        // If channel is full, put the batch back
-                        *batch = full_batch;
+                        // If channel is full, we need to restore the batch
+                        {
+                            let mut batch = self.current_batch.lock();
+                            // This assumes the batch is empty, which it should be after the replace above
+                            *batch = batch_to_send;
+                        }
                         // We didn't actually send a batch, so decrement the count
                         self.item_count.fetch_sub(1, Ordering::SeqCst);
                         return Err(BatchedQueueError::ChannelFull);
