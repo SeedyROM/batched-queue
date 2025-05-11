@@ -3,7 +3,7 @@ name = "batched-queue"
 description = "A high-performance, highly-concurrent batched queue implementation for Rust."
 readme = "README.md"
 categories = ["concurrency", "data-structures"]
-keywords = ["message queue", "batched", "concurrent", "async"]
+keywords = ["message-queue", "batched", "concurrent", "async"]
 
 version = "0.1.0-alpha"
 edition = "2024"
