@@ -31,5 +31,5 @@ async = ["tokio"]
 criterion = "0.5.1"
 
 [[bench]]
-name = "queue_benchmark"
+name = "sync_benchmark"
 harness = false
