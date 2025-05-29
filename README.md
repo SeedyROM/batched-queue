@@ -5,7 +5,8 @@ A high-performance, highly-concurrent batched queue implementation for Rust.
 [![GitHub](https://img.shields.io/badge/github-batched--queue-8da0cb?logo=github)](https://github.com/SeedyROM/batched-queue)
 [![Crates.io](https://img.shields.io/crates/v/batched-queue.svg)](https://crates.io/crates/batched-queue)
 [![Documentation](https://docs.rs/batched-queue/badge.svg)](https://docs.rs/batched-queue)
-[![crates.io version](https://img.shields.io/crates/l/batched-queue.svg)](https://github.com/SeedyROM/batched-queue/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## Overview
 
